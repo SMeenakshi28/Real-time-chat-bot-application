@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Chat Application with Chatbot</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Custom styles */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for a cleaner look */
+        #chat-messages::-webkit-scrollbar {
+            width: 6px;
+        }
+        #chat-messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        #chat-messages::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+        }
+        #chat-messages::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 flex items-center justify-center h-screen">
+
+    <div class="flex flex-col w-full max-w-4xl h-full md:h-[90vh] md:max-h-[700px] bg-white dark:bg-gray-800 shadow-2xl rounded-lg overflow-hidden">
+        <!-- Header -->
+        <header class="bg-indigo-600 text-white p-4 flex justify-between items-center shadow-md">
+            <h1 class="text-2xl font-bold">Global Chat Room</h1>
+            <div class="text-sm">
+                <span class="font-medium">Your User ID:</span>
+                <span id="user-id" class="font-mono bg-indigo-700 px-2 py-1 rounded"></span>
+            </div>
+        </header>
+
+        <!-- Chat Messages -->
+        <main id="chat-messages" class="flex-1 p-6 overflow-y-auto space-y-4">
+            <!-- Messages will be dynamically inserted here -->
+            <div id="loading-spinner" class="flex justify-center items-center h-full">
+                <svg class="animate-spin -ml-1 mr-3 h-10 w-10 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span class="text-lg">Loading Messages...</span>
+            </div>
+        </main>
+
+        <!-- Message Input Form -->
+        <footer class="p-4 bg-gray-50 dark:bg-gray-700 border-t border-gray-200 dark:border-gray-600">
+            <form id="message-form" class="flex items-center space-x-4">
+                <input
+                    type="text"
+                    id="message-input"
+                    placeholder="Type your message..."
+                    autocomplete="off"
+                    class="flex-1 p-3 bg-gray-200 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    required
+                />
+                <button
+                    type="submit"
+                    id="send-button"
+                    class="bg-indigo-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-300 disabled:bg-indigo-400 disabled:cursor-not-allowed"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-send"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                </button>
+            </form>
+        </footer>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- CONFIGURATION ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chat-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const CHATBOT_USER_ID = 'chatbot-assistant';
+
+        // --- DOM ELEMENTS ---
+        const messageForm = document.getElementById('message-form');
+        const messageInput = document.getElementById('message-input');
+        const chatMessages = document.getElementById('chat-messages');
+        const userIdDisplay = document.getElementById('user-id');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const sendButton = document.getElementById('send-button');
+
+        let db, auth, currentUserId;
+        let isBotReplying = false; // Flag to prevent the bot from replying to itself
+
+        // --- INITIALIZATION ---
+        async function main() {
+            if (!Object.keys(firebaseConfig).length) {
+                displayError("Firebase configuration is missing. The chat app cannot start.");
+                return;
+            }
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                await authenticateUser();
+                setupMessageListener();
+                messageForm.addEventListener('submit', handleSendMessage);
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                displayError("Could not connect to the chat service.");
+            }
+        }
+
+        // --- AUTHENTICATION ---
+        async function authenticateUser() {
+            return new Promise((resolve, reject) => {
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        userIdDisplay.textContent = currentUserId; // Display full ID
+                        console.log("User authenticated with ID:", currentUserId);
+                        resolve(user);
+                    } else {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                            displayError("Could not authenticate. Please refresh the page.");
+                            reject(error);
+                        }
+                    }
+                });
+            });
+        }
+
+        // --- REAL-TIME LISTENER & CHATBOT TRIGGER ---
+        function setupMessageListener() {
+            if (!db) return;
+            const messagesCollectionPath = `/artifacts/${appId}/public/data/messages`;
+            const q = query(collection(db, messagesCollectionPath));
+
+            onSnapshot(q, (snapshot) => {
+                if(loadingSpinner) loadingSpinner.style.display = 'none';
+
+                // Handle new messages to trigger the bot
+                snapshot.docChanges().forEach(async (change) => {
+                    if (change.type === "added") {
+                        const newMessage = change.doc.data();
+                        // Trigger bot only for messages from other users, not the bot itself
+                        if (newMessage.userId !== CHATBOT_USER_ID && !isBotReplying) {
+                            isBotReplying = true;
+                            try {
+                                const botReply = await generateBotReply(newMessage.text);
+                                await sendBotMessage(botReply);
+                            } catch (error) {
+                                console.error("Chatbot failed to reply:", error);
+                            } finally {
+                                isBotReplying = false;
+                            }
+                        }
+                    }
+                });
+
+                // Render all messages
+                let messages = [];
+                snapshot.forEach(doc => messages.push({ id: doc.id, ...doc.data() }));
+                messages.sort((a, b) => (a.timestamp?.toMillis() || 0) - (b.timestamp?.toMillis() || 0));
+                renderMessages(messages);
+
+            }, (error) => {
+                console.error("Error listening to messages:", error);
+                displayError("Lost connection to chat. Please refresh.");
+            });
+        }
+
+        // --- GEMINI API FOR CHATBOT REPLIES ---
+        async function generateBotReply(userMessage) {
+            const prompt = `You are a friendly and helpful chat assistant named Gemini. Keep your replies concise and conversational. The user said: "${userMessage}"`;
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+            const apiKey = ""; // Environment provides the key
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+            try {
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!response.ok) throw new Error(`API call failed: ${response.status}`);
+                const result = await response.json();
+                const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                return text || "Sorry, I'm having trouble thinking right now.";
+            } catch (error) {
+                console.error("Error generating bot reply:", error);
+                return "I couldn't process that. Please try again.";
+            }
+        }
+
+        // --- SENDING MESSAGES (USER & BOT) ---
+        async function handleSendMessage(e) {
+            e.preventDefault();
+            const messageText = messageInput.value.trim();
+            if (messageText && currentUserId) {
+                messageInput.disabled = true;
+                sendButton.disabled = true;
+                try {
+                    await addMessageToDb(messageText, currentUserId);
+                    messageInput.value = '';
+                } catch (error) {
+                    console.error("Error sending message:", error);
+                } finally {
+                    messageInput.disabled = false;
+                    sendButton.disabled = false;
+                    messageInput.focus();
+                }
+            }
+        }
+
+        async function sendBotMessage(text) {
+            try {
+                await addMessageToDb(text, CHATBOT_USER_ID);
+            } catch (error) {
+                console.error("Error sending bot message:", error);
+            }
+        }
+
+        async function addMessageToDb(text, userId) {
+            const messagesCollectionPath = `/artifacts/${appId}/public/data/messages`;
+            await addDoc(collection(db, messagesCollectionPath), {
+                text,
+                userId,
+                timestamp: serverTimestamp()
+            });
+        }
+
+        // --- UI RENDERING ---
+        function renderMessages(messages) {
+            chatMessages.innerHTML = '';
+            if (messages.length === 0) {
+                 chatMessages.innerHTML = `<div class="text-center text-gray-500 dark:text-gray-400 mt-4">No messages yet. Be the first to say something!</div>`;
+            }
+
+            messages.forEach(message => {
+                const messageElement = document.createElement('div');
+                const isCurrentUser = message.userId === currentUserId;
+                const isBot = message.userId === CHATBOT_USER_ID;
+
+                messageElement.classList.add('flex', 'flex-col', 'max-w-xs', 'md:max-w-md', 'rounded-xl', 'p-3', 'gap-1');
+
+                let senderName = message.userId;
+                if (isBot) {
+                    messageElement.classList.add('bg-teal-600', 'text-white', 'self-start', 'items-start');
+                    senderName = 'Chatbot';
+                } else if (isCurrentUser) {
+                    messageElement.classList.add('bg-indigo-600', 'text-white', 'self-end', 'items-end');
+                    senderName = 'You';
+                } else {
+                    messageElement.classList.add('bg-gray-200', 'dark:bg-gray-600', 'self-start', 'items-start');
+                }
+
+                const readableTime = message.timestamp ? new Date(message.timestamp.toMillis()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+                messageElement.innerHTML = `
+                    <p class="text-sm font-medium opacity-80">${senderName}</p>
+                    <p class="text-base break-words">${message.text}</p>
+                    <p class="text-xs opacity-60">${readableTime}</p>
+                `;
+                chatMessages.appendChild(messageElement);
+            });
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // --- UTILITY FUNCTIONS ---
+        function displayError(message) {
+            const appContainer = document.querySelector('.flex.flex-col.w-full');
+            if (appContainer) {
+                appContainer.innerHTML = `
+                    <div class="flex flex-col items-center justify-center h-full bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-200 p-8">
+                        <h2 class="text-2xl font-bold mb-4">An Error Occurred</h2>
+                        <p class="text-lg">${message}</p>
+                    </div>`;
+            }
+        }
+
+        // --- START THE APP ---
+        main();
+    </script>
+</body>
+</html>
